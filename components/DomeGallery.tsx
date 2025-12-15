@@ -1,12 +1,16 @@
 import React, { useEffect, useMemo, useRef, useCallback, useState } from 'react';
 import { useGesture } from '@use-gesture/react';
-import { DetectedFace } from '../types';
+import { DetectedFace, FaceDisplayConfig } from '../types';
 import FaceCanvas from './FaceCanvas';
+import TileVisualizer from './TileVisualizer';
 import './DomeGallery.css';
 
 type DomeGalleryProps = {
   faces: DetectedFace[];
   videoRef: React.RefObject<HTMLVideoElement>;
+  config: FaceDisplayConfig;
+  analyser: AnalyserNode | null;
+  isMusicPlaying: boolean;
   fit?: number;
   fitBasis?: 'auto' | 'min' | 'max' | 'width' | 'height';
   minRadius?: number;
@@ -31,6 +35,7 @@ type ItemDef = {
   y: number;
   sizeX: number;
   sizeY: number;
+  index: number; // Added index for visualizer variation
 };
 
 const DEFAULTS = {
@@ -58,10 +63,13 @@ type DomeTileProps = {
   videoRef: React.RefObject<HTMLVideoElement>;
   onTileClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   onTilePointerUp: (e: React.PointerEvent<HTMLDivElement>) => void;
+  config: FaceDisplayConfig;
+  analyser: AnalyserNode | null;
+  isMusicPlaying: boolean;
 };
 
 // Memoized Tile Component to prevent re-rendering of static placeholders
-const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp }: DomeTileProps) => {
+const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp, config, analyser, isMusicPlaying }: DomeTileProps) => {
   // Logic for smooth transitions
   const [isFadingOut, setIsFadingOut] = useState(false);
   const lastFaceRef = useRef<DetectedFace | null>(null);
@@ -95,13 +103,16 @@ const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp }: D
   const isVisible = !!item.face;
 
   // CSS classes for transitions
-  const placeholderClass = `absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 ${
+  const placeholderClass = `absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 overflow-hidden ${
     isVisible ? 'opacity-0' : 'opacity-100'
   }`;
 
   const faceContainerClass = `absolute inset-0 w-full h-full transition-all duration-500 ease-out ${
     isVisible ? 'opacity-100 scale-100' : 'opacity-0 scale-90'
   }`;
+
+  // Determine shape from config to apply to the container/placeholder
+  const tileRadius = config.shape === 'circle' ? '50%' : '12px';
 
   return (
     <div
@@ -125,10 +136,25 @@ const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp }: D
         tabIndex={0}
         onClick={onTileClick}
         onPointerUp={onTilePointerUp}
+        style={{
+          // Logic: If active face, transparent (show canvas). If empty, gray color.
+          backgroundColor: isVisible ? 'transparent' : '#334155', // Slate-700 for empty state
+          boxShadow: isVisible ? 'none' : 'inset 0 0 0 1px rgba(255,255,255,0.05)',
+          borderRadius: tileRadius,
+          transition: 'background-color 0.5s ease, border-radius 0.3s ease'
+        }}
       >
-        {/* Layer 1: Placeholder (Background) */}
+        {/* Layer 1: Placeholder (Background/Gray Tile + Visualizer) */}
         <div className={placeholderClass}>
-           <div className="w-1.5 h-1.5 rounded-full bg-white/10 shadow-[0_0_8px_rgba(255,255,255,0.05)]" />
+           {/* Visualizer Effect */}
+           {!isVisible && (
+             <TileVisualizer 
+                analyser={analyser} 
+                isPlaying={isMusicPlaying} 
+                shape={config.shape} 
+                index={item.index} 
+             />
+           )}
         </div>
 
         {/* Layer 2: Face (Foreground) */}
@@ -138,6 +164,7 @@ const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp }: D
                 videoRef={videoRef} 
                 boundingBox={displayFace.boundingBox} 
                 id={displayFace.id}
+                config={config}
             />
           </div>
         )}
@@ -146,11 +173,14 @@ const DomeTile = React.memo(({ item, videoRef, onTileClick, onTilePointerUp }: D
   );
 }, (prev, next) => {
   // Custom comparison
-  // Re-render if face presence or object changes, or coordinates change
-  // Note: We need to check if face went from null to object or object to null
   if (prev.item.face !== next.item.face) return false;
   if (prev.item.x !== next.item.x) return false;
   if (prev.item.y !== next.item.y) return false;
+  if (prev.config.shape !== next.config.shape) return false;
+  if (prev.config.filter !== next.config.filter) return false;
+  // Re-render only if playback state changes or analyser changes (which is rare after init)
+  if (prev.isMusicPlaying !== next.isMusicPlaying) return false;
+  if (prev.analyser !== next.analyser) return false;
   return true;
 });
 
@@ -176,6 +206,7 @@ function buildItems(pool: DetectedFace[], seg: number): ItemDef[] {
   // Map faces to grid slots 1-to-1.
   return coords.map((c, i) => ({
     ...c,
+    index: i,
     face: i < pool.length ? pool[i] : null
   }));
 }
@@ -190,6 +221,9 @@ function computeItemBaseRotation(offsetX: number, offsetY: number, sizeX: number
 export default function DomeGallery({
   faces,
   videoRef,
+  config,
+  analyser,
+  isMusicPlaying,
   fit = 0.5,
   fitBasis = 'auto',
   minRadius = 600,
@@ -449,6 +483,7 @@ export default function DomeGallery({
   );
 
   const openItemFromElement = useCallback((el: HTMLElement) => {
+    // ... (rest of logic same)
     if (openingRef.current) return;
     openingRef.current = true;
     openStartedAtRef.current = performance.now();
@@ -521,6 +556,13 @@ export default function DomeGallery({
     
     const img = document.createElement('img');
     img.src = rawSrc;
+    // Apply configs to enlarged image too
+    img.style.borderRadius = config.shape === 'circle' ? '50%' : '12px';
+    if (config.filter === 'grayscale') img.style.filter = 'grayscale(100%)';
+    else if (config.filter === 'sepia') img.style.filter = 'sepia(100%)';
+    else if (config.filter === 'invert') img.style.filter = 'invert(100%)';
+    else if (config.filter === 'contrast') img.style.filter = 'contrast(150%) saturate(0)';
+    
     overlay.appendChild(img);
     viewerRef.current!.appendChild(overlay);
 
@@ -575,7 +617,7 @@ export default function DomeGallery({
       };
       overlay.addEventListener('transitionend', onFirstEnd);
     }
-  }, [enlargeTransitionMs, lockScroll, openedImageHeight, openedImageWidth, segments, unlockScroll]);
+  }, [enlargeTransitionMs, lockScroll, openedImageHeight, openedImageWidth, segments, unlockScroll, config]);
 
   const onTileClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -669,6 +711,13 @@ export default function DomeGallery({
       if (originalImg) {
         const img = originalImg.cloneNode() as HTMLImageElement;
         img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+        // Apply config to closing animation too
+        img.style.borderRadius = config.shape === 'circle' ? '50%' : '12px';
+        if (config.filter === 'grayscale') img.style.filter = 'grayscale(100%)';
+        else if (config.filter === 'sepia') img.style.filter = 'sepia(100%)';
+        else if (config.filter === 'invert') img.style.filter = 'invert(100%)';
+        else if (config.filter === 'contrast') img.style.filter = 'contrast(150%) saturate(0)';
+        
         animatingOverlay.appendChild(img);
       }
 
@@ -737,7 +786,7 @@ export default function DomeGallery({
       scrim.removeEventListener('click', close);
       window.removeEventListener('keydown', onKey);
     };
-  }, [enlargeTransitionMs, openStartedAtRef, unlockScroll]);
+  }, [enlargeTransitionMs, openStartedAtRef, unlockScroll, config]);
 
   useEffect(() => {
     return () => {
@@ -770,6 +819,9 @@ export default function DomeGallery({
                 videoRef={videoRef}
                 onTileClick={onTileClick}
                 onTilePointerUp={onTilePointerUp}
+                config={config}
+                analyser={analyser}
+                isMusicPlaying={isMusicPlaying}
               />
             ))}
           </div>

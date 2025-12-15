@@ -1,14 +1,21 @@
 import React, { useRef, useEffect } from 'react';
-import { BoundingBox } from '../types';
+import { BoundingBox, FaceDisplayConfig } from '../types';
 
 interface FaceCanvasProps {
   videoRef: React.RefObject<HTMLVideoElement>;
   boundingBox: BoundingBox;
   id?: string;
   className?: string;
+  config?: FaceDisplayConfig;
 }
 
-const FaceCanvas: React.FC<FaceCanvasProps> = ({ videoRef, boundingBox, id, className }) => {
+const FaceCanvas: React.FC<FaceCanvasProps> = ({ 
+  videoRef, 
+  boundingBox, 
+  id, 
+  className,
+  config = { shape: 'square', filter: 'none' } 
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // Use refs for props that change every frame to avoid restarting the effect loop
@@ -42,7 +49,10 @@ const FaceCanvas: React.FC<FaceCanvasProps> = ({ videoRef, boundingBox, id, clas
           canvas.width = sWidth;
           canvas.height = sHeight;
 
-          // Mirror the drawing because the source webcam is usually mirrored
+          // Mirror detection is usually needed for webcam (user facing), 
+          // but for uploaded video we might not want mirror. 
+          // However, consistency in the dome is usually preferred.
+          // Let's keep the mirror effect for the dome aesthetic.
           ctx.save();
           ctx.translate(canvas.width, 0);
           ctx.scale(-1, 1);
@@ -109,10 +119,30 @@ const FaceCanvas: React.FC<FaceCanvasProps> = ({ videoRef, boundingBox, id, clas
     };
   }, [videoRef]);
 
+  // Compute CSS styles based on config
+  const getFilterStyle = () => {
+    switch (config.filter) {
+      case 'grayscale': return 'grayscale(100%)';
+      case 'sepia': return 'sepia(100%)';
+      case 'invert': return 'invert(100%)';
+      case 'contrast': return 'contrast(150%) saturate(0)';
+      default: return 'none';
+    }
+  };
+
+  const getShapeStyle = () => {
+    return config.shape === 'circle' ? '50%' : '12px'; // Default radius matches parent usually, but we override here
+  };
+
   return (
     <canvas
       ref={canvasRef}
       className={className || "w-full h-full object-cover block"}
+      style={{
+        filter: getFilterStyle(),
+        borderRadius: getShapeStyle(),
+        transition: 'filter 0.3s ease, border-radius 0.3s ease'
+      }}
     />
   );
 };

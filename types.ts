@@ -15,3 +15,11 @@ export interface FaceDetectorConfig {
   minDetectionConfidence: number;
   minSuppressionThreshold: number;
 }
+
+export type FaceShape = 'square' | 'circle';
+export type FaceFilter = 'none' | 'grayscale' | 'sepia' | 'invert' | 'contrast';
+
+export interface FaceDisplayConfig {
+  shape: FaceShape;
+  filter: FaceFilter;
+}
