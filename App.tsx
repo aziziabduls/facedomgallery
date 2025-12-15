@@ -6,6 +6,49 @@ import DomeGallery from './components/DomeGallery';
 // Import Lucide icons
 import { Camera, Loader2, AlertCircle } from 'lucide-react';
 
+// Simple 1D Kalman Filter for smoothing coordinates
+class SimpleKalmanFilter {
+  x: number;
+  p: number; // estimation error covariance
+  q: number; // process noise covariance
+  r: number; // measurement noise covariance
+  k: number; // kalman gain
+
+  constructor(initialValue: number, q: number = 2, r: number = 10) {
+    this.x = initialValue;
+    this.p = 1.0;
+    this.q = q;
+    this.r = r;
+    this.k = 0;
+  }
+
+  update(measurement: number): number {
+    // Prediction update
+    this.p = this.p + this.q;
+
+    // Measurement update
+    this.k = this.p / (this.p + this.r);
+    this.x = this.x + this.k * (measurement - this.x);
+    this.p = (1 - this.k) * this.p;
+
+    return this.x;
+  }
+}
+
+interface TrackedFaceData {
+  id: string;
+  lastSeen: number;
+  filters: {
+    x: SimpleKalmanFilter;
+    y: SimpleKalmanFilter;
+    w: SimpleKalmanFilter;
+    h: SimpleKalmanFilter;
+  };
+  score: number;
+  // Store current smoothed values
+  currentBox: BoundingBox; 
+}
+
 const App: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isInitializing, setIsInitializing] = useState(true);
@@ -14,13 +57,9 @@ const App: React.FC = () => {
   const lastVideoTimeRef = useRef<number>(-1);
   const animationFrameRef = useRef<number>(0);
   
-  // Robust Tracking Refs
+  // Tracking Refs
   const nextFaceIdRef = useRef<number>(1);
-  const trackedFacesRef = useRef<Array<{
-    id: string;
-    lastSeen: number;
-    boundingBox: BoundingBox;
-  }>>([]);
+  const trackedFacesRef = useRef<TrackedFaceData[]>([]);
 
   // Setup Camera and Model
   useEffect(() => {
@@ -82,7 +121,7 @@ const App: React.FC = () => {
           const detections = detectFaces(video, now);
           
           if (detections && detections.detections) {
-            const currentDets: { box: BoundingBox; score: number }[] = detections.detections.map(det => ({
+            const rawDetections = detections.detections.map(det => ({
               score: det.categories[0].score,
               box: {
                 originX: det.boundingBox?.originX ?? 0,
@@ -92,67 +131,106 @@ const App: React.FC = () => {
               }
             }));
             
-            // Prune old tracked faces (not seen for > 500ms) to allow re-assignment if they return much later
-            trackedFacesRef.current = trackedFacesRef.current.filter(f => now - f.lastSeen < 500);
+            // 1. Clean up old tracks (timeout > 500ms)
+            trackedFacesRef.current = trackedFacesRef.current.filter(t => now - t.lastSeen < 500);
 
+            const usedDetectionIndices = new Set<number>();
             const activeFaces: DetectedFace[] = [];
-            const usedTrackedIndices = new Set<number>();
 
-            // Match current detections to known tracked faces
-            for (const { box, score } of currentDets) {
-              let bestMatchIdx = -1;
-              let minDist = Infinity;
-              
-              const cx = box.originX + box.width / 2;
-              const cy = box.originY + box.height / 2;
-              
-              trackedFacesRef.current.forEach((tracked, idx) => {
-                if (usedTrackedIndices.has(idx)) return;
+            // 2. Match existing tracks to new detections (Greedy Nearest Neighbor)
+            // We use the *predicted* (last smoothed) position for matching
+            trackedFacesRef.current.forEach(track => {
+              let bestIdx = -1;
+              let bestDist = Infinity;
+              const tBox = track.currentBox;
+              const tCx = tBox.originX + tBox.width / 2;
+              const tCy = tBox.originY + tBox.height / 2;
+
+              rawDetections.forEach((det, idx) => {
+                if (usedDetectionIndices.has(idx)) return;
                 
-                const tcx = tracked.boundingBox.originX + tracked.boundingBox.width / 2;
-                const tcy = tracked.boundingBox.originY + tracked.boundingBox.height / 2;
-                
-                const dist = Math.hypot(cx - tcx, cy - tcy);
-                
-                // Allow movement up to 100% of the face width between frames/gaps
-                // This accounts for fast movement or lower frame rates
-                const threshold = Math.max(tracked.boundingBox.width, box.width) * 1.2;
-                
-                if (dist < threshold && dist < minDist) {
-                  minDist = dist;
-                  bestMatchIdx = idx;
+                const dCx = det.box.originX + det.box.width / 2;
+                const dCy = det.box.originY + det.box.height / 2;
+                const dist = Math.hypot(dCx - tCx, dCy - tCy);
+
+                // Threshold: movement less than 1.5x width roughly
+                const threshold = Math.max(tBox.width, det.box.width) * 1.5;
+
+                if (dist < threshold && dist < bestDist) {
+                  bestDist = dist;
+                  bestIdx = idx;
                 }
               });
 
-              if (bestMatchIdx !== -1) {
-                // Known face: Update tracking info
-                const tracked = trackedFacesRef.current[bestMatchIdx];
-                tracked.boundingBox = box;
-                tracked.lastSeen = now;
-                usedTrackedIndices.add(bestMatchIdx);
+              if (bestIdx !== -1) {
+                // Matched: Update filters
+                const match = rawDetections[bestIdx];
+                usedDetectionIndices.add(bestIdx);
                 
-                activeFaces.push({
-                  id: tracked.id,
-                  boundingBox: box,
-                  score
-                });
-              } else {
-                // New face: Start tracking
-                const newId = `${nextFaceIdRef.current++}`;
-                trackedFacesRef.current.push({
-                  id: newId,
-                  boundingBox: box,
-                  lastSeen: now
-                });
+                track.lastSeen = now;
+                track.score = match.score;
                 
+                // Update Kalman filters
+                const smX = track.filters.x.update(match.box.originX);
+                const smY = track.filters.y.update(match.box.originY);
+                const smW = track.filters.w.update(match.box.width);
+                const smH = track.filters.h.update(match.box.height);
+
+                track.currentBox = {
+                    originX: smX,
+                    originY: smY,
+                    width: smW,
+                    height: smH
+                };
+
                 activeFaces.push({
-                  id: newId,
-                  boundingBox: box,
-                  score
+                  id: track.id,
+                  boundingBox: track.currentBox,
+                  score: track.score
                 });
               }
-            }
-            
+            });
+
+            // 3. Create new tracks for unmatched detections
+            rawDetections.forEach((det, idx) => {
+              if (usedDetectionIndices.has(idx)) return;
+
+              const newId = `${nextFaceIdRef.current++}`;
+              // Initialize filters
+              // Q=2 (Process Noise - reactivity), R=15 (Measurement Noise - smoothness)
+              // Tuning: Higher R = smoother but more lag. Lower R = jittery but fast.
+              const filters = {
+                x: new SimpleKalmanFilter(det.box.originX, 2, 15),
+                y: new SimpleKalmanFilter(det.box.originY, 2, 15),
+                w: new SimpleKalmanFilter(det.box.width, 1, 15), // Width changes slower usually
+                h: new SimpleKalmanFilter(det.box.height, 1, 15),
+              };
+
+              // Initial update to stabilize covariance
+              filters.x.update(det.box.originX);
+              filters.y.update(det.box.originY);
+              filters.w.update(det.box.width);
+              filters.h.update(det.box.height);
+
+              const newTrack: TrackedFaceData = {
+                id: newId,
+                lastSeen: now,
+                filters,
+                score: det.score,
+                currentBox: det.box
+              };
+
+              trackedFacesRef.current.push(newTrack);
+              activeFaces.push({
+                id: newId,
+                boundingBox: det.box,
+                score: det.score
+              });
+            });
+
+            // Only update state if we have faces or if we cleared faces
+            // We sort by ID to keep order somewhat stable in DOM if needed, 
+            // though DomeGallery handles positioning.
             setFaces(activeFaces);
           }
         }
