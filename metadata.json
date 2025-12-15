@@ -1,0 +1,7 @@
+{
+  "name": "FaceDome - Live Face Detection Gallery",
+  "description": "Real-time video face detection that crops faces into an interactive 3D dome gallery running locally.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
